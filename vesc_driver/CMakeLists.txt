@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.0.2)
 project(vesc_driver)
 
 find_package(catkin REQUIRED COMPONENTS
@@ -65,9 +65,3 @@ install(FILES vesc_driver_nodelet.xml
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
 install(DIRECTORY launch/
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch)
-
-#############
-## Testing ##
-#############
-
-# TODO
