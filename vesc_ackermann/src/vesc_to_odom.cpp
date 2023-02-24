@@ -15,7 +15,8 @@ inline bool getRequiredParam(const ros::NodeHandle& nh, std::string name, T& val
 
 VescToOdom::VescToOdom(ros::NodeHandle nh, ros::NodeHandle private_nh) :
   odom_frame_("odom"), base_frame_("base_link"),
-  use_servo_cmd_(true), publish_tf_(false), x_(0.0), y_(0.0), yaw_(0.0)
+  use_servo_cmd_(true), publish_tf_(false), x_(0.0), y_(0.0), yaw_(0.0),
+  speed_(0.0), steering_angle_(0.0), angular_velocity_(0.0)
 {
   // get ROS parameters
   private_nh.param("odom_frame", odom_frame_, odom_frame_);
@@ -43,12 +44,33 @@ VescToOdom::VescToOdom(ros::NodeHandle nh, ros::NodeHandle private_nh) :
     tf_pub_.reset(new tf::TransformBroadcaster);
   }
 
+  // subscribe to reset odometry topic
+  reset_odom_sub_ = private_nh.subscribe("reset_odometry", 10,
+					 &VescToOdom::resetOdomCallback, this);
+
   // subscribe to vesc state and. optionally, servo command
   vesc_state_sub_ = nh.subscribe("sensors/core", 10, &VescToOdom::vescStateCallback, this);
   if (use_servo_cmd_) {
     servo_sub_ = nh.subscribe("sensors/servo_position_command", 10,
                               &VescToOdom::servoCmdCallback, this);
   }
+}
+
+void VescToOdom::resetOdomCallback(const std_msgs::Empty::ConstPtr& msg)
+{
+  ROS_INFO("Resetting the odometry");
+
+  // reset state
+  x_ = 0.0;
+  y_ = 0.0;
+  yaw_ = 0.0;
+  speed_ = 0.0;
+  steering_angle_ = 0.0;
+  angular_velocity_ = 0.0;
+  
+  last_state_.reset();
+
+  publishOdometry();
 }
 
 void VescToOdom::vescStateCallback(const vesc_msgs::VescStateStamped::ConstPtr& state)
@@ -58,12 +80,11 @@ void VescToOdom::vescStateCallback(const vesc_msgs::VescStateStamped::ConstPtr& 
     return;
 
   // convert to engineering units
-  double current_speed = ( state->state.speed - speed_to_erpm_offset_ ) / speed_to_erpm_gain_;
-  double current_steering_angle(0.0), current_angular_velocity(0.0);
+  speed_ = ( state->state.speed - speed_to_erpm_offset_ ) / speed_to_erpm_gain_;
   if (use_servo_cmd_) {
-    current_steering_angle =
+    steering_angle_ =
       ( last_servo_cmd_->data - steering_to_servo_offset_ ) / steering_to_servo_gain_;
-    current_angular_velocity = current_speed * tan(current_steering_angle) / wheelbase_;
+    angular_velocity_ = speed_ * tan(steering_angle_) / wheelbase_;
   }
 
   // use current state as last state if this is our first time here
@@ -76,20 +97,31 @@ void VescToOdom::vescStateCallback(const vesc_msgs::VescStateStamped::ConstPtr& 
   /** @todo could probably do better propigating odometry, e.g. trapezoidal integration */
 
   // propigate odometry
-  double x_dot = current_speed * cos(yaw_);
-  double y_dot = current_speed * sin(yaw_);
+  double x_dot = speed_ * cos(yaw_);
+  double y_dot = speed_ * sin(yaw_);
   x_ += x_dot * dt.toSec();
   y_ += y_dot * dt.toSec();
   if (use_servo_cmd_)
-    yaw_ += current_angular_velocity * dt.toSec();
+    yaw_ += angular_velocity_ * dt.toSec();
 
   // save state for next time
   last_state_ = state;
 
+  // and now publish odometry
+  publishOdometry();
+}
+
+void VescToOdom::publishOdometry()
+{
   // publish odometry message
   nav_msgs::Odometry::Ptr odom(new nav_msgs::Odometry);
   odom->header.frame_id = odom_frame_;
-  odom->header.stamp = state->header.stamp;
+  if (last_state_) {
+    odom->header.stamp = last_state_->header.stamp;
+  }
+  else {
+    odom->header.stamp = ros::Time::now();
+  }
   odom->child_frame_id = base_frame_;
 
   // Position
@@ -107,9 +139,9 @@ void VescToOdom::vescStateCallback(const vesc_msgs::VescStateStamped::ConstPtr& 
   odom->pose.covariance[35] = 0.4; ///< yaw
 
   // Velocity ("in the coordinate frame given by the child_frame_id")
-  odom->twist.twist.linear.x = current_speed;
+  odom->twist.twist.linear.x = speed_;
   odom->twist.twist.linear.y = 0.0;
-  odom->twist.twist.angular.z = current_angular_velocity;
+  odom->twist.twist.angular.z = angular_velocity_;
 
   // Velocity uncertainty
   /** @todo Think about velocity uncertainty */
